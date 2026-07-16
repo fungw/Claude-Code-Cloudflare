@@ -1,0 +1,16 @@
+{
+  "name": "claude-code-warmup",
+  "version": "1.0.0",
+  "description": "Scheduled Vercel function to warm up Claude Code's 5-hour rate limit window",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@vercel/node": "^4.0.0",
+    "typescript": "^5.4.0"
+  }
+}
