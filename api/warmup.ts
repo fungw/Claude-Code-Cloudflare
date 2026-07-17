@@ -1,4 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import * as Sentry from "@sentry/node"
+import "../instrument";
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 
@@ -29,6 +31,7 @@ async function sendWarmupMessage(
 
     if (!response.ok) {
         const text = await response.text();
+        Sentry.logger.info(`Anthropic API error: ${response.status} ${response.statusText} — ${text}`);
         throw new Error(
             `Anthropic API error: ${response.status} ${response.statusText} — ${text}`
         );
@@ -65,6 +68,7 @@ export default async function handler(
     try {
         const reply = await sendWarmupMessage(oauthToken, warmupMessage);
 
+        Sentry.logger.info(`[warmup] ✓ Success at ${timestamp}. Claude replied: "${reply}"`);
         console.log(`[warmup] ✓ Success at ${timestamp}. Claude replied: "${reply}"`);
 
         return res.status(200).json({
@@ -75,6 +79,7 @@ export default async function handler(
         });
     } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
+        Sentry.logger.info(`[warmup] ✗ Error at ${timestamp}: ${error}`);
         console.error(`[warmup] ✗ Error at ${timestamp}: ${error}`);
         return res.status(500).json({ success: false, error, timestamp });
     }
