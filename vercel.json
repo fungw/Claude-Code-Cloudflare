@@ -2,7 +2,7 @@
     "crons": [
         {
             "path": "/api/warmup",
-            "schedule": "0 9 * * *"
+            "schedule": "15 11 * * *"
         }
     ],
     "functions": {
