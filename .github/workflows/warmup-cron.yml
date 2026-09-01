@@ -2,8 +2,8 @@ name: Trigger warmup
 
 on:
   schedule:
-    # Every 6 hours — works around Vercel Hobby plan's daily-cron limit.
-    - cron: "0 0,6,12,18 * * *"
+    # Every 5 hours starting 6 AM UTC — works around Vercel Hobby plan's daily-cron limit.
+    - cron: "0 6,11,16,21 * * *"
   workflow_dispatch: {}
 
 jobs:
