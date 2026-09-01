@@ -1,13 +1,7 @@
 {
-    "crons": [
-        {
-            "path": "/api/warmup",
-            "schedule": "0 6,12,18,00 * * *"
-        }
-    ],
     "functions": {
         "api/warmup.ts": {
-            "maxDuration": 30
+            "maxDuration": 60
         }
     }
 }
