@@ -1,0 +1,22 @@
+name: Trigger warmup
+
+on:
+  schedule:
+    # Every 6 hours — works around Vercel Hobby plan's daily-cron limit.
+    - cron: "0 0,6,12,18 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call /api/warmup
+        run: |
+          status=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
+            -X GET "${{ secrets.WARMUP_URL }}/api/warmup" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          cat /tmp/response.txt
+          if [ "$status" -ge 300 ]; then
+            echo "Request failed with status $status"
+            exit 1
+          fi
