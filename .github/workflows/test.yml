@@ -1,0 +1,30 @@
+name: test
+
+# Runs the worker's unit test suite and enforces the 100% coverage gate.
+# No secrets are needed: the suite mocks every outbound call (see
+# worker/test/setup.ts) and never reaches api.anthropic.com or a real
+# Cloudflare account. Do not add a real CLAUDE_CODE_OAUTH_TOKEN here to "fix"
+# a failure — a real network call in CI is the bug, not the fix.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run test:coverage

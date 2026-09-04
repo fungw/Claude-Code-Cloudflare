@@ -24,425 +24,16 @@
  *
  * A late tick therefore costs minutes, not a whole window, and the schedule
  * re-anchors to the real boundary on every ping rather than accumulating drift.
+ *
+ * See src/tick.ts for the gating decision, src/schedule.ts for the DST-aware
+ * target-slot arithmetic, and src/anthropic.ts for the API call itself.
  */
 
-const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
-const MODEL = "claude-haiku-4-5-20251001";
-const MAX_ATTEMPTS = 3;
-const ATTEMPT_TIMEOUT_MS = 30_000;
-const STATE_KEY = "state";
-const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
-
-const DEFAULT_TARGETS = "06:00,11:00,16:00,21:00";
-/** IANA zone. Ireland's "Irish Standard Time" is the UTC+1 summer clock; winter reverts to GMT (UTC+0). */
-const DEFAULT_TIMEZONE = "Europe/Dublin";
-/** How long after a target we keep retrying before giving that slot up. Must be < the gap between targets. */
-const DEFAULT_HORIZON_MINUTES = 240;
-
-const DEFAULT_WARMUP_MESSAGE =
-    "Hello! This is an automated warm-up message to reset my Claude Code rate limit window. Please just say 'Warmed up!' in response.";
-
-interface Env {
-    WARMUP_STATE: KVNamespace;
-    CLAUDE_CODE_OAUTH_TOKEN: string;
-    WARMUP_MESSAGE?: string;
-    /** Comma-separated local wall-clock times, e.g. "06:00,11:00,16:00,21:00". */
-    TARGETS_LOCAL?: string;
-    /** IANA zone the targets above are interpreted in, e.g. "Europe/Dublin". */
-    TARGET_TIMEZONE?: string;
-    CATCHUP_HORIZON_MINUTES?: string;
-    /** Optional. When set, enables the manual POST /run trigger. */
-    DEBUG_TRIGGER_SECRET?: string;
-    VERBOSE?: string;
-}
-
-interface State {
-    /** Epoch ms of the next 5h window reset, per the last observed header. */
-    nextResetAt: number | null;
-    /** ISO of the target slot most recently served, so we serve each slot once. */
-    firedTarget: string | null;
-    lastPingAt: string | null;
-    lastOutcome: string | null;
-}
-
-const EMPTY_STATE: State = {
-    nextResetAt: null,
-    firedTarget: null,
-    lastPingAt: null,
-    lastOutcome: null,
-};
-
-interface AttemptLog {
-    attempt: number;
-    startedAt: string;
-    durationMs: number;
-    status?: number;
-    statusText?: string;
-    ok: boolean;
-    headers?: Record<string, string>;
-    usage?: unknown;
-    error?: { name: string; message: string };
-    errorBody?: string;
-}
-
-type SkipReason = "no-target" | "already-served" | "window-still-open";
-
-function emit(event: string, fields: object) {
-    console.log(JSON.stringify({ event, at: new Date().toISOString(), ...fields }));
-}
-
-function fingerprint(token: string | undefined): string {
-    if (!token) return "absent";
-    return `len=${token.length} …${token.slice(-4)}`;
-}
-
-/**
- * Keep every rate-limit header the API sends, rather than a fixed allowlist —
- * the `unified-*` family was missed once already by guessing at names.
- */
-function pickHeaders(res: Response): Record<string, string> {
-    const out: Record<string, string> = {};
-    res.headers.forEach((value, name) => {
-        if (name.startsWith("anthropic-ratelimit") || name === "request-id" || name === "retry-after") {
-            out[name] = value;
-        }
-    });
-    return out;
-}
-
-function truncate(text: string, max = 1000): string {
-    return text.length <= max ? text : `${text.slice(0, max)}… (${text.length} chars total)`;
-}
-
-function isRetryable(status: number | undefined): boolean {
-    if (status === undefined) return true; // network error or timeout
-    return status === 408 || status === 429 || status >= 500;
-}
-
-/** The window boundary the API just told us about. Falls back to now + 5h if absent. */
-function resetFromHeaders(headers: Record<string, string>, now: number): { at: number; source: string } {
-    const raw = headers["anthropic-ratelimit-unified-5h-reset"];
-    const seconds = Number(raw);
-    if (raw !== undefined && Number.isFinite(seconds) && seconds > 0) {
-        return { at: seconds * 1000, source: "header" };
-    }
-    return { at: now + FIVE_HOURS_MS, source: "fallback:+5h" };
-}
-
-function parseTargets(raw: string): { hours: number; minutes: number }[] {
-    const targets: { hours: number; minutes: number }[] = [];
-    for (const part of raw.split(",")) {
-        const trimmed = part.trim();
-        if (!trimmed) continue;
-        const [h, m = "0"] = trimmed.split(":");
-        const hours = Number(h);
-        const minutes = Number(m);
-        if (!Number.isFinite(hours) || !Number.isFinite(minutes)) {
-            throw new Error(`Invalid entry "${trimmed}" in TARGETS_LOCAL`);
-        }
-        targets.push({ hours, minutes });
-    }
-    if (targets.length === 0) throw new Error("TARGETS_LOCAL is empty");
-    return targets.sort((a, b) => a.hours * 60 + a.minutes - (b.hours * 60 + b.minutes));
-}
-
-/** The Y/M/D that `date` falls on inside `timeZone`. */
-function zonedYMD(date: Date, timeZone: string): { y: number; m: number; d: number } {
-    const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-    }).formatToParts(date);
-    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
-    return { y: get("year"), m: get("month"), d: get("day") };
-}
-
-/**
- * The UTC instant corresponding to a wall-clock date/time in `timeZone`.
- * Resolves the zone's actual offset for that date via Intl, so it tracks DST
- * automatically rather than needing the config updated when clocks change.
- */
-function zonedTimeToUtc(y: number, m: number, d: number, hh: number, mm: number, timeZone: string): number {
-    const guess = Date.UTC(y, m - 1, d, hh, mm);
-    const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone,
-        hourCycle: "h23",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-    }).formatToParts(new Date(guess));
-    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
-    const asZoned = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
-    return guess - (asZoned - guess);
-}
-
-/**
- * The most recent target slot at or before `now`, if we're still within the
- * catch-up horizon for it. Null means this tick has no slot to serve.
- */
-function currentTarget(
-    now: Date,
-    targets: { hours: number; minutes: number }[],
-    timeZone: string,
-    horizonMs: number
-): Date | null {
-    const today = zonedYMD(now, timeZone);
-    let best: number | null = null;
-
-    // Yesterday's slot matters for a late-night target with a long horizon.
-    // Date.UTC normalizes day 0 into the previous month for us.
-    for (const dayOffset of [-1, 0]) {
-        const shifted = new Date(Date.UTC(today.y, today.m - 1, today.d + dayOffset));
-        const y = shifted.getUTCFullYear();
-        const m = shifted.getUTCMonth() + 1;
-        const d = shifted.getUTCDate();
-        for (const { hours, minutes } of targets) {
-            const at = zonedTimeToUtc(y, m, d, hours, minutes, timeZone);
-            if (at <= now.getTime() && (best === null || at > best)) best = at;
-        }
-    }
-
-    if (best === null) return null;
-    return now.getTime() - best <= horizonMs ? new Date(best) : null;
-}
-
-async function readState(env: Env): Promise<State> {
-    const stored = await env.WARMUP_STATE.get<State>(STATE_KEY, "json");
-    return { ...EMPTY_STATE, ...(stored ?? {}) };
-}
-
-async function attemptWarmup(
-    env: Env,
-    message: string,
-    attempt: number,
-    verbose: boolean
-): Promise<{ log: AttemptLog; reply?: string }> {
-    const startedAt = new Date();
-    const t0 = Date.now();
-
-    if (verbose) {
-        emit("attempt.start", { attempt, url: ANTHROPIC_API_URL, model: MODEL, messageChars: message.length });
-    }
-
-    try {
-        const response = await fetch(ANTHROPIC_API_URL, {
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${env.CLAUDE_CODE_OAUTH_TOKEN}`,
-                "Content-Type": "application/json",
-                "anthropic-version": "2023-06-01",
-                "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
-            },
-            body: JSON.stringify({
-                model: MODEL,
-                max_tokens: 64,
-                messages: [{ role: "user", content: message }],
-            }),
-            signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
-        });
-
-        const headers = pickHeaders(response);
-
-        if (!response.ok) {
-            const log: AttemptLog = {
-                attempt,
-                startedAt: startedAt.toISOString(),
-                durationMs: Date.now() - t0,
-                status: response.status,
-                statusText: response.statusText,
-                ok: false,
-                headers,
-                errorBody: truncate(await response.text()),
-            };
-            emit("attempt.failed", log);
-            return { log };
-        }
-
-        const data = (await response.json()) as {
-            content?: Array<{ type: string; text?: string }>;
-            usage?: unknown;
-        };
-        const reply = data.content?.find((b) => b.type === "text")?.text ?? "(no text block)";
-
-        const log: AttemptLog = {
-            attempt,
-            startedAt: startedAt.toISOString(),
-            durationMs: Date.now() - t0,
-            status: response.status,
-            statusText: response.statusText,
-            ok: true,
-            headers,
-            usage: data.usage,
-        };
-        if (verbose) emit("attempt.ok", { ...log, reply });
-        return { log, reply };
-    } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        const log: AttemptLog = {
-            attempt,
-            startedAt: startedAt.toISOString(),
-            durationMs: Date.now() - t0,
-            ok: false,
-            error: { name: error.name, message: error.message },
-        };
-        emit("attempt.error", log);
-        return { log };
-    }
-}
-
-async function ping(env: Env, verbose: boolean) {
-    const message = env.WARMUP_MESSAGE || DEFAULT_WARMUP_MESSAGE;
-    const attempts: AttemptLog[] = [];
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        const { log, reply } = await attemptWarmup(env, message, attempt, verbose);
-        attempts.push(log);
-
-        if (log.ok) return { success: true as const, attempts, reply, headers: log.headers ?? {} };
-
-        if (!isRetryable(log.status) || attempt === MAX_ATTEMPTS) {
-            return {
-                success: false as const,
-                attempts,
-                error: log.errorBody ?? log.error?.message ?? `HTTP ${log.status ?? "?"}`,
-            };
-        }
-
-        const retryAfter = Number(log.headers?.["retry-after"]);
-        const backoffMs =
-            Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * 2 ** (attempt - 1);
-        emit("attempt.retrying", { attempt, backoffMs });
-        await new Promise((resolve) => setTimeout(resolve, backoffMs));
-    }
-
-    return { success: false as const, attempts, error: "exhausted attempts" };
-}
-
-interface TickOptions {
-    trigger: "cron" | "manual";
-    cron: string | null;
-    scheduledTime: number | null;
-    /** Manual runs may bypass the gating, to test the ping path on demand. */
-    force?: boolean;
-}
-
-async function tick(env: Env, opts: TickOptions) {
-    const runId = crypto.randomUUID();
-    const started = new Date();
-    const verbose = env.VERBOSE !== "false";
-    const horizonMs =
-        Number(env.CATCHUP_HORIZON_MINUTES ?? DEFAULT_HORIZON_MINUTES) * 60_000;
-
-    const timeZone = env.TARGET_TIMEZONE || DEFAULT_TIMEZONE;
-    const targets = parseTargets(env.TARGETS_LOCAL || DEFAULT_TARGETS);
-    const target = currentTarget(started, targets, timeZone, horizonMs);
-
-    // Whether a slot is due depends only on the clock, so answer that before
-    // touching KV. Most ticks of the day end here, at zero storage cost.
-    const clockBase = {
-        runId,
-        trigger: opts.trigger,
-        cron: opts.cron,
-        scheduledAt: opts.scheduledTime === null ? null : new Date(opts.scheduledTime).toISOString(),
-        startedAt: started.toISOString(),
-        /** Positive = the platform fired us late. Gating means this is now survivable. */
-        driftMs: opts.scheduledTime === null ? null : started.getTime() - opts.scheduledTime,
-        targetSlot: target?.toISOString() ?? null,
-        minutesSinceTarget: target ? Math.round((started.getTime() - target.getTime()) / 60_000) : null,
-    };
-
-    if (!opts.force && !target) {
-        // State fields are absent rather than null here: KV was never read.
-        if (verbose) emit("run.skipped", { ...clockBase, reason: "no-target" });
-        return { ...clockBase, action: "skipped" as const, reason: "no-target" as const, success: true };
-    }
-
-    const state = await readState(env);
-
-    const base = {
-        ...clockBase,
-        knownResetAt: state.nextResetAt === null ? null : new Date(state.nextResetAt).toISOString(),
-        minutesUntilReset:
-            state.nextResetAt === null ? null : Math.round((state.nextResetAt - started.getTime()) / 60_000),
-        firedTarget: state.firedTarget,
-    };
-
-    const skip = async (reason: SkipReason) => {
-        emit("run.skipped", { ...base, reason });
-        return { ...base, action: "skipped" as const, reason, success: true };
-    };
-
-    if (!opts.force && target) {
-        if (state.firedTarget === target.toISOString()) return skip("already-served");
-        // The decisive check: a ping inside an open window would be wasted.
-        if (state.nextResetAt !== null && started.getTime() < state.nextResetAt) {
-            return skip("window-still-open");
-        }
-    }
-
-    emit("run.start", {
-        ...base,
-        forced: Boolean(opts.force),
-        url: ANTHROPIC_API_URL,
-        model: MODEL,
-        tokenFingerprint: fingerprint(env.CLAUDE_CODE_OAUTH_TOKEN),
-    });
-
-    if (!env.CLAUDE_CODE_OAUTH_TOKEN) {
-        const report = {
-            ...base,
-            action: "pinged" as const,
-            success: false,
-            error: "CLAUDE_CODE_OAUTH_TOKEN is not set. Run `wrangler secret put CLAUDE_CODE_OAUTH_TOKEN`.",
-        };
-        emit("run.failure", report);
-        return report;
-    }
-
-    const result = await ping(env, verbose);
-    const finished = new Date();
-
-    let newReset: { at: number; source: string } | null = null;
-    if (result.success) {
-        newReset = resetFromHeaders(result.headers, finished.getTime());
-        // Only mark the slot served on success, so a failure retries next tick.
-        await env.WARMUP_STATE.put(
-            STATE_KEY,
-            JSON.stringify({
-                nextResetAt: newReset.at,
-                firedTarget: target?.toISOString() ?? state.firedTarget,
-                lastPingAt: finished.toISOString(),
-                lastOutcome: "success",
-            } satisfies State)
-        );
-    } else {
-        await env.WARMUP_STATE.put(
-            STATE_KEY,
-            JSON.stringify({ ...state, lastPingAt: finished.toISOString(), lastOutcome: "failure" } satisfies State)
-        );
-    }
-
-    const report = {
-        ...base,
-        action: "pinged" as const,
-        finishedAt: finished.toISOString(),
-        totalMs: finished.getTime() - started.getTime(),
-        success: result.success,
-        attempts: result.attempts,
-        reply: result.success ? result.reply : undefined,
-        error: result.success ? undefined : result.error,
-        newResetAt: newReset ? new Date(newReset.at).toISOString() : null,
-        newResetSource: newReset?.source ?? null,
-        rateLimit: result.success ? result.headers : undefined,
-    };
-
-    emit(result.success ? "run.success" : "run.failure", report);
-    return report;
-}
+import type { Env } from "./config";
+import { DEFAULT_TARGETS, resolveConfig } from "./config";
+import { currentTarget } from "./schedule";
+import { readState } from "./state";
+import { tick } from "./tick";
 
 export default {
     async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
@@ -451,22 +42,31 @@ export default {
         );
     },
 
-    async fetch(request: Request, env: Env): Promise<Response> {
+    async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
         const url = new URL(request.url);
 
         if (url.pathname === "/health") {
             const state = await readState(env);
             const now = new Date();
-            const timeZone = env.TARGET_TIMEZONE || DEFAULT_TIMEZONE;
-            const targets = parseTargets(env.TARGETS_LOCAL || DEFAULT_TARGETS);
-            const horizonMs = Number(env.CATCHUP_HORIZON_MINUTES ?? DEFAULT_HORIZON_MINUTES) * 60_000;
+            const configResult = resolveConfig(env);
+
+            // Bug fix: a bad TARGETS_LOCAL used to throw straight out of this
+            // handler as an opaque 500. Report the parse error explicitly instead.
+            if (!configResult.ok) {
+                return Response.json(
+                    { ok: false, error: `Invalid configuration: ${configResult.error}` },
+                    { status: 500 }
+                );
+            }
+            const { config } = configResult;
+
             return Response.json({
                 ok: true,
                 now: now.toISOString(),
                 targetsLocal: env.TARGETS_LOCAL || DEFAULT_TARGETS,
-                targetTimezone: timeZone,
-                catchupHorizonMinutes: horizonMs / 60_000,
-                currentTargetSlot: currentTarget(now, targets, timeZone, horizonMs)?.toISOString() ?? null,
+                targetTimezone: config.timeZone,
+                catchupHorizonMinutes: config.horizonMinutes,
+                currentTargetSlot: currentTarget(now, config.targets, config.timeZone, config.horizonMs)?.toISOString() ?? null,
                 tokenConfigured: Boolean(env.CLAUDE_CODE_OAUTH_TOKEN),
                 manualTriggerEnabled: Boolean(env.DEBUG_TRIGGER_SECRET),
                 state: {
