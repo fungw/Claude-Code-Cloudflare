@@ -1,0 +1,16 @@
+name = "claude-warmup"
+main = "src/index.ts"
+compatibility_date = "2026-09-04"
+
+# Persists console output to Workers Logs so it's browsable in the dashboard
+# after the fact. Without this, logs only exist live in `wrangler tail`.
+[observability]
+enabled = true
+
+[triggers]
+# Every ~5 hours, deliberately off the top of the hour.
+crons = ["23 6,11,16,21 * * *"]
+
+[vars]
+# Set to "false" once the warmup is proven, to quieten the per-attempt logging.
+VERBOSE = "true"

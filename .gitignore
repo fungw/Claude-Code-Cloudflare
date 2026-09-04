@@ -144,3 +144,8 @@ vite.config.ts.timestamp-*
 .vite/
 
 .DS_Store
+# Cloudflare Worker local secrets
+.dev.vars
+.dev.vars.*
+worker/node_modules/
+worker/.wrangler/
