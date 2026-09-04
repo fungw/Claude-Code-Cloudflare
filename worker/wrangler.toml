@@ -22,18 +22,19 @@ crons = ["*/10 * * * *"]
 
 [[kv_namespaces]]
 binding = "WARMUP_STATE"
-id = "6dfb93bbe33643778a398483d1de84e9"
+# Paste the id printed by `wrangler kv namespace create WARMUP_STATE`.
+id = "REPLACE_ME"
 
 [vars]
 # Local wall-clock times to anchor each 5h window to, interpreted in
-# TARGET_TIMEZONE below. 24h isn't divisible by 5, so these four leave a
+# TARGET_TIMEZONE below. 24h isn't divisible by 5, so four leave a
 # deliberate ~9h gap overnight in exchange for stable boundaries.
 TARGETS_LOCAL = "06:00,11:00,16:00,21:00"
 
-# IANA zone the times above are read in. The Worker resolves each target's
-# actual UTC offset per day via Intl, so this tracks DST automatically —
-# Ireland's "Irish Standard Time" is the UTC+1 summer clock, winter is GMT.
-TARGET_TIMEZONE = "Europe/Dublin"
+# IANA zone the times above are read in — set this to your own zone. The
+# Worker resolves each target's actual UTC offset per day via Intl, so this
+# tracks DST automatically.
+TARGET_TIMEZONE = "UTC"
 
 # How long after a target we keep retrying if the previous window is still open.
 # Must stay below the gap between targets.

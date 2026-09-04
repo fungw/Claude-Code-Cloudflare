@@ -68,6 +68,11 @@ npx wrangler kv namespace create WARMUP_STATE
 npm run deploy
 ```
 
+Before that last step, also edit `wrangler.toml`:
+
+- `TARGET_TIMEZONE` — set to your own IANA zone (e.g. `America/New_York`), so `TARGETS_LOCAL` is read in your local time rather than the `UTC` default.
+- `TARGETS_LOCAL` — adjust the target wall-clock times if the defaults (`06:00,11:00,16:00,21:00`) don't fit your schedule.
+
 ## Verifying it works
 
 The Worker has no public route (`workers_dev = false`), so verification goes
@@ -152,9 +157,10 @@ keep just the summary, once you're confident it works.
 `crons = ["*/10 * * * *"]` — ticks every 10 minutes; the Worker gates the
 actual pings. Change *when* windows open via `TARGETS_LOCAL` in `wrangler.toml`
 (default `06:00,11:00,16:00,21:00`), not via the cron. `TARGETS_LOCAL` is
-interpreted in `TARGET_TIMEZONE` (default `Europe/Dublin`); the Worker resolves
-each target's UTC offset per day via `Intl`, so it tracks DST automatically —
-no manual adjustment when the clocks change.
+interpreted in `TARGET_TIMEZONE` (default `UTC`; set this to your own IANA
+zone, e.g. `Europe/Dublin`); the Worker resolves each target's UTC offset per
+day via `Intl`, so it tracks DST automatically — no manual adjustment when the
+clocks change.
 
 `CATCHUP_HORIZON_MINUTES` (default 240) is how long after a target the Worker
 keeps retrying if the previous window is still open. Keep it below the gap

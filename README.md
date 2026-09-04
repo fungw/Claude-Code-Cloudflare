@@ -21,10 +21,12 @@ This runs as a **Cloudflare Worker** (see [`worker/`](worker/)) rather than a Ve
 3. It reads the `anthropic-ratelimit-unified-5h-reset` header from the response — the authoritative window boundary — and stores it, so a late or duplicate tick never wastes a ping inside an already-open window
 4. Your 5-hour window starts ticking → resets before your workday begins ✅
 
+Target times are configured in your own local timezone and stay correct across daylight saving transitions — no manual adjustment when the clocks change.
+
 Full setup, configuration, and the gating design are documented in [`worker/README.md`](worker/README.md).
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)
