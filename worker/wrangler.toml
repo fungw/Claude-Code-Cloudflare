@@ -7,7 +7,7 @@ compatibility_date = "2026-09-04"
 # on a guessable *.workers.dev URL. Inspect state with `wrangler tail` or the
 # Workers Logs dashboard instead. Flip to true (and redeploy) to get the
 # endpoints back temporarily.
-workers_dev = true   # TEMPORARY: diagnostic, revert to false
+workers_dev = false
 
 # Persists console output to Workers Logs so past cron runs are browsable in the
 # dashboard. Without this, logs only exist live in `wrangler tail`.
@@ -18,7 +18,7 @@ enabled = true
 # Ticks often; the Worker itself decides whether a ping is due. Most ticks are
 # a KV read and nothing else. This is what makes a late trigger survivable —
 # see the header comment in src/index.ts.
-crons = ["* * * * *"]   # TEMPORARY: every minute for fast feedback; revert to */10
+crons = ["*/10 * * * *"]
 
 [[kv_namespaces]]
 binding = "WARMUP_STATE"
