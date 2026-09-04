@@ -1,4 +1,4 @@
-# claude-warmup worker
+# Claude Code Cloudflare worker
 
 Cloudflare Worker that opens Claude Code's 5-hour rate-limit window at
 predictable times of day. Calls `api.anthropic.com` directly — no Vercel
