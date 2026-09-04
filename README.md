@@ -27,4 +27,4 @@ Full setup, configuration, and the gating design are documented in [`worker/READ
 
 ## License
 
-MIT
+[MIT](LICENSE)

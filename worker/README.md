@@ -68,6 +68,11 @@ npx wrangler kv namespace create WARMUP_STATE
 npm run deploy
 ```
 
+Before that last step, also edit `wrangler.toml`:
+
+- `TARGET_TIMEZONE` — set to your own IANA zone (e.g. `America/New_York`), so `TARGETS_LOCAL` is read in your local time rather than the `UTC` default.
+- `TARGETS_LOCAL` — adjust the target wall-clock times if the defaults (`06:00,11:00,16:00,21:00`) don't fit your schedule.
+
 ## Verifying it works
 
 The Worker has no public route (`workers_dev = false`), so verification goes
