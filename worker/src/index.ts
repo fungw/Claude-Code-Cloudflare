@@ -14,7 +14,7 @@
  *   - The API reports `anthropic-ratelimit-unified-5h-reset` on every response.
  *     That is the authoritative window boundary; we persist it to KV.
  *   - Each tick pings only if (a) we are inside the catch-up horizon after one
- *     of the TARGETS_UTC times, (b) that target hasn't been served yet, and
+ *     of the TARGETS_LOCAL times (in TARGET_TIMEZONE), (b) that target hasn't been served yet, and
  *     (c) the stored reset time has passed.
  *   - Otherwise the tick does nothing and costs no API call.
  *
@@ -34,6 +34,8 @@ const STATE_KEY = "state";
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 
 const DEFAULT_TARGETS = "06:00,11:00,16:00,21:00";
+/** IANA zone. Ireland's "Irish Standard Time" is the UTC+1 summer clock; winter reverts to GMT (UTC+0). */
+const DEFAULT_TIMEZONE = "Europe/Dublin";
 /** How long after a target we keep retrying before giving that slot up. Must be < the gap between targets. */
 const DEFAULT_HORIZON_MINUTES = 240;
 
@@ -44,8 +46,10 @@ interface Env {
     WARMUP_STATE: KVNamespace;
     CLAUDE_CODE_OAUTH_TOKEN: string;
     WARMUP_MESSAGE?: string;
-    /** Comma-separated UTC times, e.g. "06:00,11:00,16:00,21:00". */
-    TARGETS_UTC?: string;
+    /** Comma-separated local wall-clock times, e.g. "06:00,11:00,16:00,21:00". */
+    TARGETS_LOCAL?: string;
+    /** IANA zone the targets above are interpreted in, e.g. "Europe/Dublin". */
+    TARGET_TIMEZONE?: string;
     CATCHUP_HORIZON_MINUTES?: string;
     /** Optional. When set, enables the manual POST /run trigger. */
     DEBUG_TRIGGER_SECRET?: string;
@@ -125,8 +129,8 @@ function resetFromHeaders(headers: Record<string, string>, now: number): { at: n
     return { at: now + FIVE_HOURS_MS, source: "fallback:+5h" };
 }
 
-function parseTargets(raw: string): number[] {
-    const targets: number[] = [];
+function parseTargets(raw: string): { hours: number; minutes: number }[] {
+    const targets: { hours: number; minutes: number }[] = [];
     for (const part of raw.split(",")) {
         const trimmed = part.trim();
         if (!trimmed) continue;
@@ -134,26 +138,70 @@ function parseTargets(raw: string): number[] {
         const hours = Number(h);
         const minutes = Number(m);
         if (!Number.isFinite(hours) || !Number.isFinite(minutes)) {
-            throw new Error(`Invalid entry "${trimmed}" in TARGETS_UTC`);
+            throw new Error(`Invalid entry "${trimmed}" in TARGETS_LOCAL`);
         }
-        targets.push(hours * 60 + minutes);
+        targets.push({ hours, minutes });
     }
-    if (targets.length === 0) throw new Error("TARGETS_UTC is empty");
-    return targets.sort((a, b) => a - b);
+    if (targets.length === 0) throw new Error("TARGETS_LOCAL is empty");
+    return targets.sort((a, b) => a.hours * 60 + a.minutes - (b.hours * 60 + b.minutes));
+}
+
+/** The Y/M/D that `date` falls on inside `timeZone`. */
+function zonedYMD(date: Date, timeZone: string): { y: number; m: number; d: number } {
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    }).formatToParts(date);
+    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+    return { y: get("year"), m: get("month"), d: get("day") };
+}
+
+/**
+ * The UTC instant corresponding to a wall-clock date/time in `timeZone`.
+ * Resolves the zone's actual offset for that date via Intl, so it tracks DST
+ * automatically rather than needing the config updated when clocks change.
+ */
+function zonedTimeToUtc(y: number, m: number, d: number, hh: number, mm: number, timeZone: string): number {
+    const guess = Date.UTC(y, m - 1, d, hh, mm);
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+    }).formatToParts(new Date(guess));
+    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+    const asZoned = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+    return guess - (asZoned - guess);
 }
 
 /**
  * The most recent target slot at or before `now`, if we're still within the
  * catch-up horizon for it. Null means this tick has no slot to serve.
  */
-function currentTarget(now: Date, targetMinutes: number[], horizonMs: number): Date | null {
-    const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+function currentTarget(
+    now: Date,
+    targets: { hours: number; minutes: number }[],
+    timeZone: string,
+    horizonMs: number
+): Date | null {
+    const today = zonedYMD(now, timeZone);
     let best: number | null = null;
 
-    // Yesterday's slots matter for a late-night target with a long horizon.
+    // Yesterday's slot matters for a late-night target with a long horizon.
+    // Date.UTC normalizes day 0 into the previous month for us.
     for (const dayOffset of [-1, 0]) {
-        for (const minutes of targetMinutes) {
-            const at = midnight + dayOffset * 86_400_000 + minutes * 60_000;
+        const shifted = new Date(Date.UTC(today.y, today.m - 1, today.d + dayOffset));
+        const y = shifted.getUTCFullYear();
+        const m = shifted.getUTCMonth() + 1;
+        const d = shifted.getUTCDate();
+        for (const { hours, minutes } of targets) {
+            const at = zonedTimeToUtc(y, m, d, hours, minutes, timeZone);
             if (at <= now.getTime() && (best === null || at > best)) best = at;
         }
     }
@@ -289,8 +337,9 @@ async function tick(env: Env, opts: TickOptions) {
     const horizonMs =
         Number(env.CATCHUP_HORIZON_MINUTES ?? DEFAULT_HORIZON_MINUTES) * 60_000;
 
-    const targets = parseTargets(env.TARGETS_UTC || DEFAULT_TARGETS);
-    const target = currentTarget(started, targets, horizonMs);
+    const timeZone = env.TARGET_TIMEZONE || DEFAULT_TIMEZONE;
+    const targets = parseTargets(env.TARGETS_LOCAL || DEFAULT_TARGETS);
+    const target = currentTarget(started, targets, timeZone, horizonMs);
 
     // Whether a slot is due depends only on the clock, so answer that before
     // touching KV. Most ticks of the day end here, at zero storage cost.
@@ -408,14 +457,16 @@ export default {
         if (url.pathname === "/health") {
             const state = await readState(env);
             const now = new Date();
-            const targets = parseTargets(env.TARGETS_UTC || DEFAULT_TARGETS);
+            const timeZone = env.TARGET_TIMEZONE || DEFAULT_TIMEZONE;
+            const targets = parseTargets(env.TARGETS_LOCAL || DEFAULT_TARGETS);
             const horizonMs = Number(env.CATCHUP_HORIZON_MINUTES ?? DEFAULT_HORIZON_MINUTES) * 60_000;
             return Response.json({
                 ok: true,
                 now: now.toISOString(),
-                targetsUtc: env.TARGETS_UTC || DEFAULT_TARGETS,
+                targetsLocal: env.TARGETS_LOCAL || DEFAULT_TARGETS,
+                targetTimezone: timeZone,
                 catchupHorizonMinutes: horizonMs / 60_000,
-                currentTargetSlot: currentTarget(now, targets, horizonMs)?.toISOString() ?? null,
+                currentTargetSlot: currentTarget(now, targets, timeZone, horizonMs)?.toISOString() ?? null,
                 tokenConfigured: Boolean(env.CLAUDE_CODE_OAUTH_TOKEN),
                 manualTriggerEnabled: Boolean(env.DEBUG_TRIGGER_SECRET),
                 state: {

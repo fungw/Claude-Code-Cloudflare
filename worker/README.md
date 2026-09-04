@@ -14,7 +14,7 @@ too, cascading through the day. A fixed cron cannot see any of this.
 So the cron ticks every 10 minutes and the Worker decides:
 
 ```
-if no TARGETS_UTC slot in the last CATCHUP_HORIZON_MINUTES  -> skip
+if no TARGETS_LOCAL slot in the last CATCHUP_HORIZON_MINUTES  -> skip
 if this slot was already served                             -> skip
 if the stored window reset time hasn't passed yet           -> skip, retry next tick
 otherwise                                                   -> ping, store the new reset
@@ -59,7 +59,7 @@ npm run tail        # live ticks as they fire
 ```
 
 Every 10 minutes you should see a `run.skipped` (usually `no-target`), and at
-each `TARGETS_UTC` slot a `run.success`. Past runs are also browsable in the
+each `TARGETS_LOCAL` slot a `run.success`. Past runs are also browsable in the
 Workers Logs dashboard, since `[observability]` is enabled — that's the record
 to check the morning after, when `tail` wasn't running.
 
@@ -131,8 +131,11 @@ keep just the summary, once you're confident it works.
 ## Schedule
 
 `crons = ["*/10 * * * *"]` — ticks every 10 minutes; the Worker gates the
-actual pings. Change *when* windows open via `TARGETS_UTC` in `wrangler.toml`
-(default `06:00,11:00,16:00,21:00`), not via the cron.
+actual pings. Change *when* windows open via `TARGETS_LOCAL` in `wrangler.toml`
+(default `06:00,11:00,16:00,21:00`), not via the cron. `TARGETS_LOCAL` is
+interpreted in `TARGET_TIMEZONE` (default `Europe/Dublin`); the Worker resolves
+each target's UTC offset per day via `Intl`, so it tracks DST automatically —
+no manual adjustment when the clocks change.
 
 `CATCHUP_HORIZON_MINUTES` (default 240) is how long after a target the Worker
 keeps retrying if the previous window is still open. Keep it below the gap
