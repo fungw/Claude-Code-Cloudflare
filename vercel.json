@@ -1,7 +1,0 @@
-{
-    "functions": {
-        "api/warmup.ts": {
-            "maxDuration": 60
-        }
-    }
-}
