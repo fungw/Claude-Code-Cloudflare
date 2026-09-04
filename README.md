@@ -23,6 +23,22 @@ This runs as a **Cloudflare Worker** (see [`worker/`](worker/)) rather than a Ve
 
 Target times are configured in your own local timezone and stay correct across daylight saving transitions — no manual adjustment when the clocks change.
 
+### Choosing your target times
+
+24 hours isn't divisible by 5, so four windows a day always leaves a gap somewhere — put it where it counts. Splitting the day naively every 5 hours from a 9 AM start gives you:
+
+```
+9 AM → 2 PM → 7 PM → 12 AM
+```
+
+That last window opens at midnight, burning a ping on a window nobody's awake to use. Shift the same four windows earlier instead:
+
+```
+6 AM → 11 AM → 4 PM → 9 PM
+```
+
+Now the ~9-hour gap falls overnight, where it's free, and every window lands during hours you're actually likely to be working — much better session window allocation for the same four pings a day. This is the worker's default (`TARGETS_LOCAL = "06:00,11:00,16:00,21:00"`); adjust it to fit your own schedule.
+
 Full setup, configuration, and the gating design are documented in [`worker/README.md`](worker/README.md).
 
 ---
