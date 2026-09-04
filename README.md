@@ -1,4 +1,4 @@
-# ⚡ Claude Code Warmup
+# 🔥 ClaudeCodeCloudFlareUp
 
 > Automatically warm up your Claude Code rate limit window so it resets right before your work session.
 
