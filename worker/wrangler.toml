@@ -2,6 +2,13 @@ name = "claude-warmup"
 main = "src/index.ts"
 compatibility_date = "2026-09-04"
 
+# No public route. Cron triggers fire regardless, and the fetch handler only
+# ever served /health and the optional debug trigger — neither worth exposing
+# on a guessable *.workers.dev URL. Inspect state with `wrangler tail` or the
+# Workers Logs dashboard instead. Flip to true (and redeploy) to get the
+# endpoints back temporarily.
+workers_dev = false
+
 # Persists console output to Workers Logs so past cron runs are browsable in the
 # dashboard. Without this, logs only exist live in `wrangler tail`.
 [observability]

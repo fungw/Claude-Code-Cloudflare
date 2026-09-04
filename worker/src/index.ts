@@ -290,10 +290,11 @@ async function tick(env: Env, opts: TickOptions) {
         Number(env.CATCHUP_HORIZON_MINUTES ?? DEFAULT_HORIZON_MINUTES) * 60_000;
 
     const targets = parseTargets(env.TARGETS_UTC || DEFAULT_TARGETS);
-    const state = await readState(env);
     const target = currentTarget(started, targets, horizonMs);
 
-    const base = {
+    // Whether a slot is due depends only on the clock, so answer that before
+    // touching KV. Most ticks of the day end here, at zero storage cost.
+    const clockBase = {
         runId,
         trigger: opts.trigger,
         cron: opts.cron,
@@ -303,6 +304,18 @@ async function tick(env: Env, opts: TickOptions) {
         driftMs: opts.scheduledTime === null ? null : started.getTime() - opts.scheduledTime,
         targetSlot: target?.toISOString() ?? null,
         minutesSinceTarget: target ? Math.round((started.getTime() - target.getTime()) / 60_000) : null,
+    };
+
+    if (!opts.force && !target) {
+        // State fields are absent rather than null here: KV was never read.
+        if (verbose) emit("run.skipped", { ...clockBase, reason: "no-target" });
+        return { ...clockBase, action: "skipped" as const, reason: "no-target" as const, success: true };
+    }
+
+    const state = await readState(env);
+
+    const base = {
+        ...clockBase,
         knownResetAt: state.nextResetAt === null ? null : new Date(state.nextResetAt).toISOString(),
         minutesUntilReset:
             state.nextResetAt === null ? null : Math.round((state.nextResetAt - started.getTime()) / 60_000),
@@ -310,13 +323,11 @@ async function tick(env: Env, opts: TickOptions) {
     };
 
     const skip = async (reason: SkipReason) => {
-        // "no-target" is the common case on most ticks; only log it when verbose.
-        if (reason !== "no-target" || verbose) emit("run.skipped", { ...base, reason });
+        emit("run.skipped", { ...base, reason });
         return { ...base, action: "skipped" as const, reason, success: true };
     };
 
-    if (!opts.force) {
-        if (!target) return skip("no-target");
+    if (!opts.force && target) {
         if (state.firedTarget === target.toISOString()) return skip("already-served");
         // The decisive check: a ping inside an open window would be wasted.
         if (state.nextResetAt !== null && started.getTime() < state.nextResetAt) {

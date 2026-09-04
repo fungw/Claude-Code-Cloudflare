@@ -42,9 +42,6 @@ npx wrangler login
 # The only required secret. Generate with `claude setup-token`.
 npx wrangler secret put CLAUDE_CODE_OAUTH_TOKEN
 
-# Optional: enables POST /run so you can trigger a warmup on demand.
-npx wrangler secret put DEBUG_TRIGGER_SECRET
-
 # Create the state store, then paste the printed id into wrangler.toml
 # (it replaces id = "REPLACE_ME").
 npx wrangler kv namespace create WARMUP_STATE
@@ -54,26 +51,39 @@ npm run deploy
 
 ## Verifying it works
 
+The Worker has no public route (`workers_dev = false`), so verification goes
+through logs rather than HTTP:
+
 ```bash
-# 1. Is the token deployed?
-curl https://claude-warmup.<subdomain>.workers.dev/health
-
-# 2. Run the gating logic now (usually a no-op — that's the point).
-curl -X POST https://claude-warmup.<subdomain>.workers.dev/run \
-  -H "Authorization: Bearer $DEBUG_TRIGGER_SECRET"
-
-# 2b. Force an actual ping, bypassing the gating. Burns a request and opens a
-#     window even if one is already open — for testing the ping path only.
-curl -X POST "https://claude-warmup.<subdomain>.workers.dev/run?force=1" \
-  -H "Authorization: Bearer $DEBUG_TRIGGER_SECRET"
-
-# 3. Watch logs live (also test the cron path locally with `wrangler dev --test-scheduled`)
-npm run tail
+npm run tail        # live ticks as they fire
 ```
 
-Logs are also persisted to Workers Logs (`[observability]` in `wrangler.toml`),
-so you can browse past cron runs in the dashboard rather than needing `tail`
-open at the moment it fires.
+Every 10 minutes you should see a `run.skipped` (usually `no-target`), and at
+each `TARGETS_UTC` slot a `run.success`. Past runs are also browsable in the
+Workers Logs dashboard, since `[observability]` is enabled — that's the record
+to check the morning after, when `tail` wasn't running.
+
+To exercise the ping path without waiting for a slot, run it locally against
+the real API:
+
+```bash
+printf 'CLAUDE_CODE_OAUTH_TOKEN=<token>\nDEBUG_TRIGGER_SECRET=local\n' > .dev.vars
+npx wrangler dev --test-scheduled
+
+# in another shell — fires the cron path
+curl "http://localhost:8799/cdn-cgi/handler/scheduled?cron=*/10+*+*+*+*"
+
+# or the gating logic on demand, with ?force=1 to bypass it
+curl -X POST "http://localhost:8799/run" -H "Authorization: Bearer local"
+```
+
+`.dev.vars` is gitignored. Local `wrangler dev` uses its own KV store under
+`.wrangler/`, so this never touches production state.
+
+If you do want `/health` and `/run` reachable in production, set
+`workers_dev = true`, redeploy, and set `DEBUG_TRIGGER_SECRET` — without that
+secret `/run` stays disabled (403), and `/health` is unauthenticated, so it
+exposes your target times and window state to anyone who guesses the URL.
 
 ## What gets logged
 
@@ -97,6 +107,9 @@ One JSON line per event. The `run.success` / `run.failure` summary carries:
 | `newResetAt` / `newResetSource` | Boundary after the ping; `header` or `fallback:+5h` |
 | `rateLimit` | Full `anthropic-ratelimit-*` set, incl. 5h/7d utilization |
 | `reason` (on `run.skipped`) | `no-target`, `already-served`, `window-still-open` |
+
+A `no-target` line carries no window fields at all — that decision is made from
+the clock before KV is read, so those ticks cost no storage read either.
 
 Useful queries once it's running:
 
