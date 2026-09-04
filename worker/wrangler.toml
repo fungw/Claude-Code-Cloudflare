@@ -2,15 +2,32 @@ name = "claude-warmup"
 main = "src/index.ts"
 compatibility_date = "2026-09-04"
 
-# Persists console output to Workers Logs so it's browsable in the dashboard
-# after the fact. Without this, logs only exist live in `wrangler tail`.
+# Persists console output to Workers Logs so past cron runs are browsable in the
+# dashboard. Without this, logs only exist live in `wrangler tail`.
 [observability]
 enabled = true
 
 [triggers]
-# Every ~5 hours, deliberately off the top of the hour.
-crons = ["23 6,11,16,21 * * *"]
+# Ticks often; the Worker itself decides whether a ping is due. Most ticks are
+# a KV read and nothing else. This is what makes a late trigger survivable —
+# see the header comment in src/index.ts.
+crons = ["*/10 * * * *"]
+
+# Run once, then paste the id it prints:
+#   npx wrangler kv namespace create WARMUP_STATE
+[[kv_namespaces]]
+binding = "WARMUP_STATE"
+id = "REPLACE_ME"
 
 [vars]
-# Set to "false" once the warmup is proven, to quieten the per-attempt logging.
+# UTC times to anchor each 5h window to. 24h isn't divisible by 5, so these
+# four leave a deliberate ~9h gap overnight in exchange for stable boundaries.
+TARGETS_UTC = "06:00,11:00,16:00,21:00"
+
+# How long after a target we keep retrying if the previous window is still open.
+# Must stay below the gap between targets.
+CATCHUP_HORIZON_MINUTES = "240"
+
+# Set to "false" once the warmup is proven, to drop per-attempt logging and the
+# routine "no-target" skip lines.
 VERBOSE = "true"
