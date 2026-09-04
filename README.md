@@ -14,12 +14,12 @@ Claude Code's rate limits work on a **rolling 5-hour window** — the clock star
 
 ## How It Works
 
-This runs as a **Cloudflare Worker** (see [`worker/`](worker/)) rather than a Vercel function or GitHub Actions cron:
+This runs as a **Cloudflare Worker** (see [`worker/`](worker/)):
 
 1. The Worker ticks every 10 minutes and checks whether it's near one of your configured local target times (e.g. 6 AM)
 2. It pings the Anthropic API directly with your `CLAUDE_CODE_OAUTH_TOKEN`
 3. It reads the `anthropic-ratelimit-unified-5h-reset` header from the response — the authoritative window boundary — and stores it, so a late or duplicate tick never wastes a ping inside an already-open window
-4. Your 5-hour window starts ticking → resets before your workday begins ✅
+4. Your 5-hour window starts ticking → resets much sooner after your workday begins ✅
 
 Target times are configured in your own local timezone and stay correct across daylight saving transitions — no manual adjustment when the clocks change.
 
