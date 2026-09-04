@@ -149,3 +149,5 @@ vite.config.ts.timestamp-*
 .dev.vars.*
 worker/node_modules/
 worker/.wrangler/
+
+.claude
