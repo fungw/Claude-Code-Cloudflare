@@ -13,11 +13,9 @@ enabled = true
 # see the header comment in src/index.ts.
 crons = ["*/10 * * * *"]
 
-# Run once, then paste the id it prints:
-#   npx wrangler kv namespace create WARMUP_STATE
 [[kv_namespaces]]
 binding = "WARMUP_STATE"
-id = "REPLACE_ME"
+id = "6dfb93bbe33643778a398483d1de84e9"
 
 [vars]
 # UTC times to anchor each 5h window to. 24h isn't divisible by 5, so these
