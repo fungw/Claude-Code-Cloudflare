@@ -1,8 +1,7 @@
 # Claude Code Cloudflare worker
 
 Cloudflare Worker that opens Claude Code's 5-hour rate-limit window at
-predictable times of day. Calls `api.anthropic.com` directly — no Vercel
-function in the loop.
+predictable times of day. Calls `api.anthropic.com` directly.
 
 ## How it decides to ping
 
@@ -118,7 +117,7 @@ One JSON line per event. The `run.success` / `run.failure` summary carries:
 | `runId` | Correlates the attempt lines with the summary |
 | `scheduledAt` | When the cron was **due** |
 | `startedAt` | When the Worker **actually** ran |
-| `driftMs` | The gap between those two — the GitHub Actions problem, now measured |
+| `driftMs` | The gap between those two measured |
 | `finishedAt` / `totalMs` | Wall-clock cost of the whole run |
 | `url` / `model` | Exactly what was hit |
 | `tokenFingerprint` | `len=… …abcd`, to confirm *which* token is deployed |
