@@ -377,15 +377,55 @@ worker/
 | 5 | CI | 0.5h |
 | | **Total** | **~8.5h** |
 
-## 8. Open questions
+## 8. Implementation notes (post-execution)
 
-1. **Fix the findings in §5 as part of this work, or file them separately?**
-   Recommendation: pin in Phase 0–4, fix in a follow-up PR, so the test PR stays
-   a pure addition and the behaviour changes get reviewed on their own merits.
+The plan above was written before implementation; two details of the installed
+`@cloudflare/vitest-pool-workers@0.22.0` didn't match what was assumed, and are
+recorded here rather than silently edited away above:
+
+- **No `defineWorkersConfig`.** This version exposes a Vite plugin,
+  `cloudflareTest(options)`, used as `plugins: [cloudflareTest({...})]` in a
+  plain `defineConfig` from `vitest/config`, rather than the wrapped config
+  helper described in §3. `vitest.config.mts` uses `.mts` specifically because
+  the plugin package is ESM-only and this project's `package.json` has no
+  `"type": "module"`.
+- **No `fetchMock` export.** The undici-mocking helper documented for earlier
+  pool versions isn't present in this one — confirmed absent from both the
+  type declarations and the built runtime module. §1's plan to intercept
+  outbound HTTP that way doesn't apply. In its place: the `fetchImpl`/`sleep`
+  seams from §2 do all the outbound-call substitution work, and
+  `test/setup.ts` installs a global `fetch` guard (`vi.stubGlobal`) that throws
+  on any unmocked call, so the "never spend a real rate-limit window" guarantee
+  holds regardless of which mocking API a given pool version offers.
+- **A dedicated `wrangler.test.toml`.** The real `wrangler.toml`'s
+  `compatibility_date` is normally kept current; the workerd binary bundled
+  with a given pool release lags behind by design. Rather than back-date the
+  deploy config to chase the test tooling, tests point at a minimal
+  `wrangler.test.toml` (name, main, an older `compatibility_date`, and the KV
+  binding) that is never used for `wrangler deploy`.
+
+All four bugs in §5 were fixed as part of the same change that built the test
+suite (not deferred to a follow-up as §8 originally floated), since the
+refactor needed to touch every one of those call sites anyway: each is pinned
+by a named test (see the "bug fix" cases across `config.test.ts`,
+`anthropic.test.ts`, and `tick.test.ts`) asserting the *fixed* behavior.
+
+Final result: **100% statements/branches/functions/lines** over `src/`, two
+`istanbul ignore` exclusions (both documented inline) for branches that are
+genuinely unreachable given the code's own invariants — not skipped because a
+test was hard to write.
+
+## 9. Open questions
+
+1. ~~Fix the findings in §5 as part of this work, or file them separately?~~
+   **Resolved:** fixed in the same change (see §8) — the refactor touched every
+   affected call site regardless, so deferring would have meant a second pass
+   over the same lines. Each fix is pinned by a named "bug fix" test.
 2. **Is `100%` a hard CI gate or a ratchet?** Recommendation: hard gate at 100%
    from day one. The codebase is ~500 lines; the moment it becomes a ratchet it
-   becomes 94% forever.
+   becomes 94% forever. Implemented as a hard gate in `vitest.config.mts` and
+   `.github/workflows/test.yml`.
 3. **Is one nightly live smoke test against the real API worth a rate-limit
    window?** Probably not — the mocked contract plus the existing
    `wrangler tail` observability covers it, and a live test costs the very thing
-   the Worker exists to protect.
+   the Worker exists to protect. Not implemented.

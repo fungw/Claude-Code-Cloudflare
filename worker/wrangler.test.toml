@@ -1,0 +1,19 @@
+# Test-only wrangler config, used solely by vitest.config.mts.
+#
+# compatibility_date is pinned below the real wrangler.toml's date because the
+# workerd binary bundled with the installed @cloudflare/vitest-pool-workers
+# version caps out earlier than "today" — a local test-tooling limit, not a
+# statement about what's safe to deploy. Never used for `wrangler deploy`.
+name = "claude-warmup-test"
+main = "src/index.ts"
+compatibility_date = "2026-08-22"
+
+[[kv_namespaces]]
+binding = "WARMUP_STATE"
+id = "test-namespace"
+
+[vars]
+# Placeholder secret so `env.CLAUDE_CODE_OAUTH_TOKEN` is truthy by default in
+# SELF.fetch()-based tests; individual tests override it to test the
+# missing-token path.
+CLAUDE_CODE_OAUTH_TOKEN = "test-token-from-wrangler-test-toml"

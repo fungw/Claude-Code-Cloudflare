@@ -32,6 +32,25 @@ call.
 Note that 24 isn't divisible by 5. The default targets give four windows a day
 with a deliberate ~9h gap overnight, in exchange for boundaries that stay put.
 
+## Testing
+
+```bash
+npm test              # runs the suite once
+npm run test:watch    # reruns on save
+npm run test:coverage # runs with the 100% coverage gate enforced
+npm run typecheck     # src/ and test/ separately, since they use different type roots
+```
+
+Tests run inside the real Workers runtime via `@cloudflare/vitest-pool-workers`
+(so `Intl`-based DST arithmetic and KV behave exactly as in production), against
+`wrangler.test.toml` — a test-only config, never used for `wrangler deploy`.
+No test ever makes a real call to `api.anthropic.com`: a global `fetch` guard in
+`test/setup.ts` throws if one slips through, and the retry/ping logic is
+exercised via injected `fetchImpl`/`sleep`/`now` seams instead. See
+[`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) for the full case matrix and rationale.
+CI (`.github/workflows/test.yml`) runs `typecheck` and `test:coverage` on every
+push and PR.
+
 ## Setup
 
 ```bash
